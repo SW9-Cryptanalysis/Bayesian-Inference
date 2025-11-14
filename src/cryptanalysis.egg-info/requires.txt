@@ -1,0 +1,6 @@
+gutenberg-cleaner>=0.1.6
+nltk>=3.9.2
+num2words>=0.5.14
+parameter-validator>=0.1.1
+requests>=2.32.5
+unidecode>=1.4.0

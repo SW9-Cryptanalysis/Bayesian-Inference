@@ -1,0 +1,21 @@
+[project]
+name = "cryptanalysis"
+version = "0.1.0"
+description = ""
+requires-python = ">=3.12"
+
+dependencies = [
+    "gutenberg-cleaner>=0.1.6",
+    "nltk>=3.9.2",
+    "num2words>=0.5.14",
+    "parameter-validator>=0.1.1",
+    "requests>=2.32.5",
+    "unidecode>=1.4.0",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv.sources]
+parameter-validator = { git = "https://github.com/jatewo/parameter-validator.git" }
