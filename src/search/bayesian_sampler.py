@@ -1,9 +1,10 @@
 import random
 import math
 import logging
-from typing import List, Dict, Tuple, Optional, Set
+import json
+from typing import Counter, List, Dict, Tuple, Optional, Set
 from lm_models.interpolated_model import InterpolatedLanguageModel
-from utils.constants import TOTAL_ITERATIONS, INITIAL_TEMPERATURE
+from utils.constants import TOTAL_ITERATIONS, INITIAL_TEMPERATURE, PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +18,12 @@ class BayesianSampler:
             lm_model: An instance of InterpolatedLanguageModel for scoring plaintexts.
             ground_truth_key: Ground truth key mapping plaintext letters to cipher symbol lists (from cipher JSON).
         """
-        self.ciphertext = ciphertext
+        self._ciphertext = ciphertext
         self.lm_model = lm_model
         self.ground_truth_key = self._convert_ground_truth_key(ground_truth_key)
         self.temperature = INITIAL_TEMPERATURE  # Initial temperature for simulated annealing
         self.space_positions: Set[int] = self.initialize_space_positions()
-        self.current_key = self.initialize_key()
+        self.current_key = self._initialize_key()
         self.current_plaintext = self.decrypt()
         self.current_score = lm_model.log_score_text(self.current_plaintext)
         
@@ -57,12 +58,12 @@ class BayesianSampler:
             Set[int]: A set representing initial space positions.
         """
         positions: Set[int] = set()
-        if not self.ciphertext:
+        if not self._ciphertext:
             return positions
 
         min_gap, max_gap = 2, 6
         idx = random.randint(0, max_gap)
-        text_len = len(self.ciphertext)
+        text_len = len(self._ciphertext)
 
         while idx < text_len:
             positions.add(idx)
@@ -70,17 +71,48 @@ class BayesianSampler:
 
         return positions
     
-    def initialize_key(self) -> Dict[int, str]:
+    def _initialize_key(self) -> Dict[int, str]:
         """
-        Initializes a random substitution key based on the ciphertext character set.
+        Initializes a substitution key by matching frequent cipher symbols to frequent plaintext letters.
+        Uses a proportional allocation strategy: if 'e' represents 12.7% of English text and you have
+        30 cipher symbols, approximately 3-4 symbols should map to 'e'. This helps homophonic cipher
+        decryption converge faster than simple round-robin allocation.
         
         Returns:
-            Dict[int, str]: A random substitution key mapping integer codes to lower-case plaintext characters.
+            Dict[int, str]: A substitution key mapping cipher symbol codes to plaintext characters.
         """
-        unique_chars = set(self.ciphertext)
-        plaintext_chars = 'abcdefghijklmnopqrstuvwxyz'
+        freq_file = PROJECT_ROOT / 'data' / 'frequencies' / 'english_letter_frequencies.json'
+        with open(freq_file, 'r') as f:
+            freq_data = json.load(f)
         
-        substitution_key = {char_code: random.choice(plaintext_chars) for char_code in unique_chars}
+        sorted_english_letters = sorted(freq_data.keys(), key=lambda x: freq_data[x], reverse=True)
+        sorted_english_letters = [char.lower() for char in sorted_english_letters]
+        
+        symbol_counts = Counter(self._ciphertext)
+        sorted_cipher_symbols = [symbol for symbol, _ in symbol_counts.most_common()]
+        
+        substitution_key = {}
+        num_symbols = len(sorted_cipher_symbols)
+        symbol_idx = 0
+        
+        for letter in sorted_english_letters:
+            expected_proportion = freq_data[letter.upper()]
+            num_symbols_for_letter = max(1, round(expected_proportion * num_symbols))
+            
+            for _ in range(num_symbols_for_letter):
+                if symbol_idx >= num_symbols:
+                    break
+                substitution_key[sorted_cipher_symbols[symbol_idx]] = letter
+                symbol_idx += 1
+            
+            if symbol_idx >= num_symbols:
+                break
+        
+        while symbol_idx < num_symbols:
+            letter = sorted_english_letters[symbol_idx % len(sorted_english_letters)]
+            substitution_key[sorted_cipher_symbols[symbol_idx]] = letter
+            symbol_idx += 1
+        
         return substitution_key
         
     def decrypt(self) -> str:
@@ -95,11 +127,11 @@ class BayesianSampler:
     def _build_plaintext_from_key(self, key: Dict[int, str], space_positions: Set[int]) -> str:
         """Constructs plaintext by applying a key and inserting spaces at recorded positions."""
         plaintext_chars: List[str] = []
-        for idx, char_code in enumerate(self.ciphertext):
+        for idx, char_code in enumerate(self._ciphertext):
             if idx in space_positions:
                 plaintext_chars.append(' ')
             plaintext_chars.append(key[char_code])
-        if len(self.ciphertext) in space_positions:
+        if len(self._ciphertext) in space_positions:
             plaintext_chars.append(' ')
         return ''.join(plaintext_chars)
     
@@ -120,7 +152,7 @@ class BayesianSampler:
         Resamples the key by iterating through all unique cipher symbols
         in random order and proposing new character mappings.
         """
-        unique_symbols = list(set(self.ciphertext))
+        unique_symbols = list(set(self._ciphertext))
         random.shuffle(unique_symbols)
         
         plaintext_chars = 'abcdefghijklmnopqrstuvwxyz'
@@ -176,15 +208,15 @@ class BayesianSampler:
         Proposes inserting or removing spaces at random positions
         to find word boundaries.
         """
-        num_proposals = max(1, len(self.ciphertext))
-        available_positions = len(self.ciphertext) + 1
+        num_proposals = max(1, len(self._ciphertext))
+        available_positions = len(self._ciphertext) + 1
         
         for _ in range(num_proposals):
             if available_positions == 0:
                 continue
             
             # Pick a random insertion/removal point between symbols (inclusive of ends)
-            position = random.randint(0, len(self.ciphertext))
+            position = random.randint(0, len(self._ciphertext))
             proposed_space_positions = set(self.space_positions)
             if position in proposed_space_positions:
                 proposed_space_positions.remove(position)
