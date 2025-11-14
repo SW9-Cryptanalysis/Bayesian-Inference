@@ -1,5 +1,8 @@
+import logging
 import math
 import os
+
+logger = logging.getLogger(__name__)
 
 class DictionaryLanguageModel:
     """
@@ -51,15 +54,14 @@ class DictionaryLanguageModel:
         """
         Calculates the log-score for a given plaintext.
         
-        The score scales with text length to match n-gram model behavior.
-        For each word: log(P_valid) if valid, log(P_invalid) if invalid
-        where P_valid and P_invalid are empirically chosen probabilities.
+        The score is the log of the ratio of valid words.
+        log( (valid_words + epsilon) / (total_words + epsilon) )
         
         Args:
             text: The space-segmented plaintext hypothesis (e.g., "I LIKE KILLING")
             
         Returns:
-            float: The log-score (negative number, less negative is better).
+            float: The log-score (<= 0.0, where 0.0 is a perfect score).
         """
         words = text.split()
         
@@ -70,13 +72,12 @@ class DictionaryLanguageModel:
         for word in words:
             if word in self.word_set:
                 valid_word_count += 1
+                logger.debug(f'Valid word found: {word}')
+                
         
-        invalid_word_count = len(words) - valid_word_count
+        # Add a small epsilon to avoid log(0) if no words are valid
+        epsilon = 1e-10
         
-        log_p_valid = -10.0      # log(P) for valid word
-        log_p_invalid = -50.0    # log(P) for invalid word
+        ratio = (valid_word_count + epsilon) / (len(words) + epsilon)
         
-        total_log_prob = (valid_word_count * log_p_valid) + \
-                        (invalid_word_count * log_p_invalid)
-        
-        return total_log_prob
+        return math.log(ratio)
