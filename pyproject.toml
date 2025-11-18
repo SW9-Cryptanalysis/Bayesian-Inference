@@ -9,7 +9,10 @@ dependencies = [
     "nltk>=3.9.2",
     "num2words>=0.5.14",
     "parameter-validator>=0.1.1",
+    "pytest>=9.0.1",
+    "pytest-cov>=6.0.0",
     "requests>=2.32.5",
+    "ruff>=0.14.5",
     "unidecode>=1.4.0",
 ]
 
@@ -19,3 +22,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.uv.sources]
 parameter-validator = { git = "https://github.com/jatewo/parameter-validator.git" }
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-v --tb=short --cov=src --cov-report=term-missing"

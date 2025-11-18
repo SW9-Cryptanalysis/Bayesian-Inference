@@ -9,7 +9,7 @@ from utils.constants import TOTAL_ITERATIONS, INITIAL_TEMPERATURE, PROJECT_ROOT
 logger = logging.getLogger(__name__)
 
 class BayesianSampler:
-    def __init__(self, ciphertext: List[int], lm_model: InterpolatedLanguageModel, ground_truth_key: Dict[str, List[int]]):
+    def __init__(self, ciphertext: List[int], lm_model: InterpolatedLanguageModel, ground_truth_key: Dict[str, List[int]], seed: Optional[int] = None):
         """
         Initializes the Bayesian sampler with the ciphertext, current key, and language model.
         
@@ -17,7 +17,12 @@ class BayesianSampler:
             ciphertext: List of integers representing the ciphertext.
             lm_model: An instance of InterpolatedLanguageModel for scoring plaintexts.
             ground_truth_key: Ground truth key mapping plaintext letters to cipher symbol lists (from cipher JSON).
+            seed: Optional random seed for reproducibility. If None, uses system randomness.
         """
+        # Set random seed if provided for reproducibility
+        if seed is not None:
+            random.seed(seed)
+        
         self._ciphertext = ciphertext
         self.lm_model = lm_model
         self.ground_truth_key = self._convert_ground_truth_key(ground_truth_key)
@@ -296,7 +301,7 @@ class BayesianSampler:
                 logger.info(f"  Current plaintext: {self.current_plaintext[:100]}...")
                 logger.info(f"  Best plaintext: {self.best_plaintext[:100]}...")
         
-        logger.info(f"\nSampling complete!")
+        logger.info("\nSampling complete!")
         logger.info(f"Final best score: {self.best_score:.2f}")
         
         # Log final SER

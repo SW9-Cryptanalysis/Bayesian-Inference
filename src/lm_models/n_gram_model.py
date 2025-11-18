@@ -3,9 +3,10 @@ import pickle
 import os
 import logging
 from datetime import datetime
-from nltk.lm.preprocessing import padded_everygram_pipeline
+from nltk.lm.preprocessing import padded_everygram_pipeline, pad_both_ends
 from nltk.lm import Laplace
 from text_fetching.fetcher import Fetcher
+from utils.formatting import format_text
 
 logger = logging.getLogger(__name__)
 
@@ -39,45 +40,49 @@ class NgramLanguageModel:
         Returns:
             float: Probability P(p) of the text (0 to 1)
         """
-        log_prob = self.model.logscore(list(text))
+        # Preprocess text to match training data format
+        preprocessed_text = format_text(text)
+        if not preprocessed_text:
+            return 0.0
+        
+        log_prob = self.model.logscore(list(preprocessed_text))
         # Convert log probability to actual probability
         # Note: This can be very small for long texts
         probability = math.exp(log_prob)
         return probability
     
     def log_score_text(self, text: str) -> float:
-        """Calculate the TOTAL log probability for a plaintext sequence.
-        
-        This is what you should use for MCMC sampling and comparing plaintexts.
-        Higher (less negative) values indicate more probable text.
-        
-        IMPORTANT: Returns TOTAL log probability, not average per character.
-        
-        Args:
-            text: The plaintext string to score
-            
-        Returns:
-            float: Total log probability (negative number, closer to 0 is better)
         """
-        chars = list(text)
+        Calculates the AVERAGE log probability PER CHARACTER.
+        """
+        if not text:
+            return -float('inf')
+        
+        preprocessed_text = format_text(text)
+        
+        if not preprocessed_text:
+            return -float('inf')
+        
+        # IMPORTANT: NLTK's logscore() has a bug and returns incorrect values.
+        # We must compute the log probability manually.
+        char_list = list(preprocessed_text)
+        
+        padded = list(pad_both_ends(char_list, n=self.n))
+        
+        # Compute log probability by summing log P(char | context) for each position
         total_log_prob = 0.0
-        
-        # Calculate log probability for each character given context
-        for i in range(len(chars)):
-            # Get context (previous n-1 characters)
-            context = tuple(chars[max(0, i-(self.n-1)):i])
+        for i in range(self.n - 1, len(padded)):
+            context = tuple(padded[i - (self.n - 1):i])
+            char = padded[i]
+            prob = self.model.score(char, context)
             
-            # Get log probability of this character
-            char_prob = self.model.score(chars[i], context)
+            if prob <= 0:
+                return -float('inf')
             
-            # Add log probability (avoid log(0) with small epsilon)
-            if char_prob > 0:
-                total_log_prob += math.log(char_prob)
-            else:
-                # Should not happen with Laplace smoothing, but just in case
-                total_log_prob += -1e10  # Very large negative number
-        
-        return total_log_prob
+            total_log_prob += math.log(prob)
+            
+        # Normalize by the number of characters to get avg log prob
+        return total_log_prob / len(preprocessed_text)
     
     def perplexity_text(self, text: str) -> float:
         """Calculate perplexity for a plaintext sequence.
@@ -90,7 +95,11 @@ class NgramLanguageModel:
         Returns:
             float: Perplexity (lower is better)
         """
-        return self.model.perplexity(list(text))
+        # Preprocess text to match training data format
+        preprocessed_text = format_text(text)
+        if not preprocessed_text:
+            return float('inf')
+        return self.model.perplexity(list(preprocessed_text))
     
     def score_char(self, char: str, context: tuple) -> float:
         """Get probability of a character given its context.
@@ -135,15 +144,20 @@ def train_ngram_model(n: int = 3) -> NgramLanguageModel:
         logger.info(f"Average chunk length: {sum(len(chunk) for chunk in tokenized_data) / len(tokenized_data):.0f} characters")
 
     # --- 2. Preprocessing & Training ---
-    train_data, vocab = padded_everygram_pipeline(n, tokenized_data)
+    # IMPORTANT: padded_everygram_pipeline returns generators that can only be consumed once
+    # We need to materialize them OR pass directly to fit() without intermediate assignment
+    logger.info("Preparing training data and vocabulary...")
+    train_data, padded_sents = padded_everygram_pipeline(n, tokenized_data)
 
     # Initialize the model
     # Laplace smoothing adds one count to each n-gram to prevent zero probabilities.
     model = Laplace(n)
 
     # Train the model
+    # CRITICAL: fit() expects (training_data, vocabulary_text)
+    # We need to convert the generators to lists OR call it correctly
     logger.info(f"Training {n}-gram model...")
-    model.fit(train_data, vocab)
+    model.fit(train_data, padded_sents)
 
     # --- 3. Using the Trained Model ---
     logger.info(f"\n--- {n}-gram LM Trained ---")
@@ -177,7 +191,7 @@ def test_ngram_model(lm: NgramLanguageModel):
     log_prob_4 = lm.log_score_text(plaintext_hypothesis_4)
     logger.info(f"Score: {log_prob_4:8.2f} | Text: '{plaintext_hypothesis_4}'")
     
-    plaintext_hypothesis_5 = "This is a real sentence but it is very long"
+    plaintext_hypothesis_5 = "this is a real sentence but it is very long"
     log_prob_5 = lm.log_score_text(plaintext_hypothesis_5)
     logger.info(f"Score: {log_prob_5:8.2f} | Text: '{plaintext_hypothesis_5}'")
 
@@ -205,8 +219,8 @@ def save_model(lm: NgramLanguageModel, n: int, num_chunks: int) -> str:
     with open(filename, 'wb') as f:
         pickle.dump(lm, f)
     
-    logger.info(f"Model saved successfully!")
-    logger.info(f"Model details:")
+    logger.info("Model saved successfully!")
+    logger.info("Model details:")
     logger.info(f"  - N-gram order: {n}")
     logger.info(f"  - Training chunks: {num_chunks:,}")
     logger.info(f"  - Vocabulary size: {len(lm.model.vocab)}")
@@ -228,7 +242,7 @@ def load_ngram_model(filepath: str) -> NgramLanguageModel:
     with open(filepath, 'rb') as f:
         lm = pickle.load(f)
     
-    logger.info(f"Model loaded successfully!")
+    logger.info("Model loaded successfully!")
     logger.info(f"  - N-gram order: {lm.n}")
     logger.info(f"  - Vocabulary size: {len(lm.model.vocab)}")
     

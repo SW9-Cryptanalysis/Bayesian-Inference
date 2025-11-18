@@ -2,7 +2,6 @@ from unidecode import unidecode
 import re
 from num2words import num2words
 from parameter_validator import parameter_validator, strongly_typed
-from gutenberg_cleaner import simple_cleaner
 
 
 def numbers_to_words(text: str) -> str:
@@ -26,20 +25,45 @@ def numbers_to_words(text: str) -> str:
 
 @parameter_validator(text=strongly_typed)
 def format_text(text: str) -> str:
-	"""Format text by filtering to alphabetic characters and spaces, converting to lowercase.
+    """
+    Cleans and formats raw text from Project Gutenberg.
+    
+    1. Removes Gutenberg headers/footers.
+    2. Converts numbers to words.
+    3. Normalizes to ASCII and converts to lowercase.
+    4. Filters to keep *only* a-z and spaces.
+    5. Collapses multiple spaces into one.
+    """
+    
+    # 1. Manually remove Gutenberg headers/footers
+    #    This is more reliable than an external library.
+    start_marker = "*** START OF THIS PROJECT GUTENBERG EBOOK"
+    end_marker = "*** END OF THIS PROJECT GUTENBERG EBOOK"
+    
+    try:
+        start_index = text.index(start_marker)
+        start_index = text.index('\n', start_index) # Find the newline after the marker
+    except ValueError:
+        start_index = 0 # If marker not found, start from the beginning
 
-	Args:
-			text (str): A slice of text from a book
+    try:
+        end_index = text.index(end_marker)
+    except ValueError:
+        end_index = len(text) # If marker not found, go to the end
+        
+    text = text[start_index:end_index]
 
-	Returns:
-			str: The text slice converted to lowercase
-				keeping only alphabetic characters and spaces.
-
-	"""
-	text = simple_cleaner(text)
-	text = numbers_to_words(text)
-	text = numbers_to_words(text)
-	text = unidecode(text.lower())
-	text = re.sub(r"[A-Z]", "", text)
-	# Keep only lowercase letters a-z and spaces
-	return "".join([c for c in text if c.isalpha() or c == ' '])
+    # 2. Convert numbers to words (e.g., "101" -> "one hundred one")
+    text = numbers_to_words(text)
+    
+    # 3. Normalize to ASCII (e.g., "naïve" -> "naive") and lowercase
+    text = unidecode(text.lower())
+    
+    # 4. Filter to keep ONLY lowercase letters and spaces
+    #    This one line replaces both of your broken filter lines.
+    text = re.sub(r"[^a-z ]", "", text)
+    
+    # 5. Collapse multiple spaces into a single space
+    text = re.sub(r" +", " ", text).strip()
+    
+    return text

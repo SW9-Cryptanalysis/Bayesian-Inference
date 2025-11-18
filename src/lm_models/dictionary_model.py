@@ -6,78 +6,104 @@ logger = logging.getLogger(__name__)
 
 class DictionaryLanguageModel:
     """
-    Scores plaintext hypotheses based on a word dictionary.
+    Scores plaintext hypotheses based on a unigram word model.
     
-    This model assigns a score P_word(p) based on the percentage of
-    space-delimited words in the text `p` that exist in a known
-    word list.
+    This model assigns a score P_word(p) based on word frequencies,
+    computing the total log probability as the sum of log probabilities
+    of all words in the text.
     """
     
     def __init__(self, word_list_path: str):
         """
-        Initializes the model by loading the word list.
+        Initializes the model by loading the word list with frequencies.
         
         Args:
             word_list_path: Path to the text file containing the
-                            word list (one word per line).
+                            word list (one word per line with frequency counts).
         """
-        self.word_set = self.load_word_list(word_list_path)
+        self.word_counts, self.total_word_tokens = self.load_word_list(word_list_path)
+        self.log_probs = self._compute_log_probs()
+        self.log_prob_unknown = math.log(1 / (self.total_word_tokens * 10))
 
-    def load_word_list(self, path: str) -> set:
-        """Loads the word list into a set for O(1) lookups.
+    def load_word_list(self, path: str) -> tuple:
+        """Loads the word list with frequencies.
         
         Args:
             path: Path to the word list file.
             
         Returns:
-            set: A set of words loaded from the file.
+            tuple: A tuple containing (word_counts dict, total_word_tokens int).
         """
         if not os.path.exists(path):
             raise FileNotFoundError(f"Word list file not found: {path}")
             
-        word_set = set()
+        word_counts = {}
+        total_tokens = 0
+        
         with open(path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 
-                # Split on whitespace and take only the first part (the word)
-                # This handles formats like "word 12345" or just "word"
+                # Split on whitespace: "word count"
                 parts = line.split()
-                if parts:
+                if len(parts) >= 2:
                     word = parts[0].lower()  # Store words in lowercase
-                    word_set.add(word)
-        return word_set
+                    try:
+                        count = int(parts[1])
+                        word_counts[word] = count
+                        total_tokens += count
+                    except ValueError:
+                        logger.warning(f"Invalid count for word '{parts[0]}': {parts[1]}")
+                        continue
+                elif len(parts) == 1:
+                    # If no count is provided, assume count of 1
+                    word = parts[0].lower()
+                    word_counts[word] = 1
+                    total_tokens += 1
+        
+        return word_counts, total_tokens
+
+    def _compute_log_probs(self) -> dict:
+        """Computes log probabilities for all words in the dictionary.
+        
+        Returns:
+            dict: A dictionary mapping words to their log probabilities.
+        """
+        log_probs = {}
+        for word, count in self.word_counts.items():
+            log_probs[word] = math.log(count / self.total_word_tokens)
+        
+        logger.info(f"Computed log probabilities for {len(log_probs)} words")
+        return log_probs
 
     def log_score_text(self, text: str) -> float:
         """
-        Calculates the log-score for a given plaintext.
+        Calculates the total log-score from the unigram word model,
+        normalized by the total number of CHARACTERS in the text.
         
-        The score is the log of the ratio of valid words.
-        log( (valid_words + epsilon) / (total_words + epsilon) )
-        
-        Args:
-            text: The space-segmented plaintext hypothesis (e.g., "I LIKE KILLING")
-            
-        Returns:
-            float: The log-score (<= 0.0, where 0.0 is a perfect score).
+        This normalization puts it on the same "per-character" scale
+        as the n-gram model.
         """
         words = text.split()
         
         if not words:
             return -float('inf')
 
-        valid_word_count = 0
+        total_dict_log_score = 0.0
         for word in words:
-            if word in self.word_set:
-                valid_word_count += 1
-                logger.debug(f'Valid word found: {word}')
-                
+            # Get the log-prob for the word, or the "unknown" prob if not found
+            word_lower = word.lower()
+            if word_lower in self.log_probs:
+                total_dict_log_score += self.log_probs[word_lower]
+                # logger.debug(f'Valid word found: {word} (log_prob: {self.log_probs[word_lower]:.4f})')
+            else:
+                total_dict_log_score += self.log_prob_unknown
+                # logger.debug(f'Unknown word: {word} (log_prob: {self.log_prob_unknown:.4f})')
         
-        # Add a small epsilon to avoid log(0) if no words are valid
-        epsilon = 1e-10
-        
-        ratio = (valid_word_count + epsilon) / (len(words) + epsilon)
-        
-        return math.log(ratio)
+        # Normalize by the CHARACTER length of the text (including spaces).
+        # This puts it on the same scale as the n-gram model
+        # (avg log prob per character).
+        # We use max(1, len(text)) to avoid ZeroDivisionError for empty strings.
+        return total_dict_log_score / max(1, len(text))
