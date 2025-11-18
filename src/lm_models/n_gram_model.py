@@ -46,38 +46,18 @@ class NgramLanguageModel:
         return probability
     
     def log_score_text(self, text: str) -> float:
-        """Calculate the TOTAL log probability for a plaintext sequence.
-        
-        This is what you should use for MCMC sampling and comparing plaintexts.
-        Higher (less negative) values indicate more probable text.
-        
-        IMPORTANT: Returns TOTAL log probability, not average per character.
-        
-        Args:
-            text: The plaintext string to score
-            
-        Returns:
-            float: Total log probability (negative number, closer to 0 is better)
         """
-        chars = list(text)
-        total_log_prob = 0.0
-        
-        # Calculate log probability for each character given context
-        for i in range(len(chars)):
-            # Get context (previous n-1 characters)
-            context = tuple(chars[max(0, i-(self.n-1)):i])
-            
-            # Get log probability of this character
-            char_prob = self.model.score(chars[i], context)
-            
-            # Add log probability (avoid log(0) with small epsilon)
-            if char_prob > 0:
-                total_log_prob += math.log(char_prob)
-            else:
-                # Should not happen with Laplace smoothing, but just in case
-                total_log_prob += -1e10  # Very large negative number
-        
-        return total_log_prob
+        Calculates the TOTAL log probability for a plaintext sequence.
+        """
+        # NLTK's model.logscore already calculates the total log prob
+        # of the sequence, handling padding and context correctly.
+        try:
+            # We need to tokenize into a list of characters,
+            # just as the model was trained.
+            return self.model.logscore(list(text))
+        except Exception as e:
+            logger.warning(f"Error scoring text: {e}. Returning -inf.")
+            return -float('inf')
     
     def perplexity_text(self, text: str) -> float:
         """Calculate perplexity for a plaintext sequence.
