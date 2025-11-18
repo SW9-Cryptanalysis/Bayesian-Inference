@@ -1,6 +1,7 @@
 import logging
 import requests
-from typing import Generator, Any
+from typing import Any
+from collections.abc import Generator
 from utils.formatting import format_text
 from utils.files import save_book, book_is_cached, get_cached_book
 
@@ -147,11 +148,11 @@ class Fetcher:
 
 		"""
 		url = GUTENDEX_BASE_URL
-  
+
 		for book_id in self.BOOK_IDS:
 			self.book_id = book_id
 			self.is_cached = book_is_cached(self.book_id)
-   
+
 			if self.is_cached:
 				yield get_cached_book(self.book_id)
 				continue

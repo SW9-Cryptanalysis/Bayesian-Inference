@@ -1,10 +1,9 @@
 import json
 import pathlib
 import os
-from typing import Tuple, Dict, List
 from utils.constants import EXAMPLE_CIPHERS_PATH
 
-def load_cipher(filepath: pathlib.Path) -> Tuple[List[int], Dict[str, List[int]]]:
+def load_cipher(filepath: pathlib.Path) -> tuple[list[int], dict[str, list[int]]]:
     """Read a cipher from a JSON file.
 
     Args:
