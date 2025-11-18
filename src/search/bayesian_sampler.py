@@ -301,7 +301,7 @@ class BayesianSampler:
                 logger.info(f"  Current plaintext: {self.current_plaintext[:100]}...")
                 logger.info(f"  Best plaintext: {self.best_plaintext[:100]}...")
         
-        logger.info("\nSampling complete!")
+        logger.info(f"\nSampling complete!")
         logger.info(f"Final best score: {self.best_score:.2f}")
         
         # Log final SER

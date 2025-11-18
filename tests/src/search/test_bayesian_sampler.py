@@ -124,8 +124,6 @@ class TestBayesianSamplerKeyPass(unittest.TestCase):
         """Test that key pass proposes new character mappings."""
         sampler = BayesianSampler(self.ciphertext, self.mock_lm_model, self.ground_truth_key)
         
-        original_key = sampler.current_key.copy()
-        
         # Run one key pass
         sampler.sample_key_pass()
         
@@ -181,10 +179,6 @@ class TestBayesianSamplerKeyPass(unittest.TestCase):
         
         unique_symbols = set(self.ciphertext)
         
-        # Track which symbols get new proposals
-        proposed_symbols = set()
-        original_key = sampler.current_key.copy()
-        
         # Run multiple passes to ensure coverage
         for _ in range(10):
             sampler.sample_key_pass()
@@ -231,8 +225,6 @@ class TestBayesianSamplerSpacePass(unittest.TestCase):
             return -10.0 + call_count[0] * 0.5
         
         self.mock_lm_model.log_score_text.side_effect = increasing_score
-        
-        initial_space_count = len(sampler.space_positions)
         
         # Run multiple passes
         for _ in range(5):
@@ -298,7 +290,6 @@ class TestBayesianSamplerMetropolisHastings(unittest.TestCase):
         self.mock_lm_model.log_score_text.return_value = -5.0  # Much better
         sampler.temperature = 1.0
         
-        initial_score = sampler.current_score
         sampler.sample_key_pass()
         
         # Score should improve
@@ -321,7 +312,6 @@ class TestBayesianSamplerMetropolisHastings(unittest.TestCase):
         # Run multiple times and count acceptances
         acceptances = 0
         for _ in range(100):
-            initial_score = sampler.current_score
             sampler.sample_key_pass()
             if sampler.current_score == -10.5:
                 acceptances += 1
@@ -344,7 +334,6 @@ class TestBayesianSamplerMetropolisHastings(unittest.TestCase):
         # Run multiple times and count acceptances
         acceptances = 0
         for _ in range(100):
-            initial_score = sampler.current_score
             sampler.sample_key_pass()
             if sampler.current_score == -11.0:
                 acceptances += 1
