@@ -2,8 +2,6 @@ import logging
 import pathlib
 from lm_models.n_gram_model import load_ngram_model
 from lm_models.dictionary_model import DictionaryLanguageModel
-from lm_models.interpolated_model import InterpolatedLanguageModel
-from search.bayesian_sampler import BayesianSampler
 from search.crp_bayesian_sampler import CRPBayesianSampler
 from utils.load_cipher import load_cipher
 
@@ -38,13 +36,5 @@ if __name__ == "__main__":
             seed=42,
             use_crp=True
         )
-    else:
-        logger = logging.getLogger(__name__)
-        logger.info("=" * 60)
-        logger.info("Using Original Bayesian Sampler (Standard LM)")
-        logger.info("=" * 60)
-        
-        interpolated_model = InterpolatedLanguageModel(ngram_model, dictionary_model)
-        searcher = BayesianSampler(cipher, interpolated_model, ground_truth_key, seed=42)
 
     searcher.run()
