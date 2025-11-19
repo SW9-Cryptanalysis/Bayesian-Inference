@@ -234,6 +234,98 @@ class IncrementalScorer:
         
         return total_log_prob
     
+    def _remove_window_from_cache(self, plaintext: str, start: int, end: int, cache: CRPCache) -> None:
+        """Remove n-grams in the window from the cache.
+        
+        Used to create the 'shared cache' by removing the affected region.
+        """
+        if start >= end:
+            return
+            
+        window_text = plaintext[start:end]
+        char_list = list(window_text.lower())
+        padded = list(pad_both_ends(char_list, n=self.n))
+        
+        for i in range(self.n - 1, len(padded)):
+            context = tuple(padded[i - (self.n - 1):i])
+            char = padded[i]
+            cache.remove_ngram(context, char)
+
+    def _remove_substitutions_from_cache(self, ciphertext: List[int], plaintext: str, 
+                                         changed_symbol: int, key: dict, cache: ChannelCache) -> None:
+        """Remove substitutions for a specific symbol from the cache.
+        
+        Used to create the 'shared cache' by removing the affected substitutions.
+        """
+        plaintext_no_spaces = plaintext.replace(" ", "").lower()
+        
+        for cipher_symbol, plain_char in zip(ciphertext, plaintext_no_spaces):
+            if cipher_symbol == changed_symbol:
+                cache.remove_substitution(plain_char, cipher_symbol)
+
+    def _add_window_to_cache(self, plaintext: str, start: int, end: int, cache: CRPCache) -> None:
+        """Add n-grams in the window to the cache."""
+        if start >= end:
+            return
+            
+        window_text = plaintext[start:end]
+        char_list = list(window_text.lower())
+        padded = list(pad_both_ends(char_list, n=self.n))
+        
+        for i in range(self.n - 1, len(padded)):
+            context = tuple(padded[i - (self.n - 1):i])
+            char = padded[i]
+            cache.add_ngram(context, char)
+
+    def _add_substitutions_to_cache(self, ciphertext: List[int], plaintext: str, 
+                                    changed_symbol: int, key: dict, cache: ChannelCache) -> None:
+        """Add substitutions for a specific symbol to the cache."""
+        plaintext_no_spaces = plaintext.replace(" ", "").lower()
+        
+        for cipher_symbol, plain_char in zip(ciphertext, plaintext_no_spaces):
+            if cipher_symbol == changed_symbol:
+                cache.add_substitution(plain_char, cipher_symbol)
+
+    def apply_key_changes_to_cache(self, ciphertext: List[int], 
+                                  old_plaintext: str, new_plaintext: str,
+                                  old_key: dict, new_key: dict,
+                                  changed_symbol: int,
+                                  space_positions: Set[int]) -> None:
+        """Apply the changes to the actual model caches (after acceptance)."""
+        
+        # Find affected positions
+        affected_positions = self.find_affected_positions_in_plaintext(
+            ciphertext, changed_symbol, space_positions
+        )
+        if not affected_positions:
+            return
+
+        # Find context window
+        start, end = self.find_context_window(new_plaintext, affected_positions)
+        
+        # Update Source Cache
+        # Remove old window
+        self._remove_window_from_cache(old_plaintext, start, end, self.source_model.cache)
+        # Add new window
+        self._add_window_to_cache(new_plaintext, start, end, self.source_model.cache)
+        
+        # Update Channel Cache
+        # Remove old substitutions
+        self._remove_substitutions_from_cache(ciphertext, old_plaintext, changed_symbol, old_key, self.channel_model.cache)
+        # Add new substitutions
+        self._add_substitutions_to_cache(ciphertext, new_plaintext, changed_symbol, new_key, self.channel_model.cache)
+
+    def apply_space_changes_to_cache(self, old_plaintext: str, new_plaintext: str,
+                                    old_start: int, old_end: int,
+                                    new_start: int, new_end: int) -> None:
+        """Apply space changes to the source model cache (after acceptance)."""
+        # Remove old window
+        self._remove_window_from_cache(old_plaintext, old_start, old_end, self.source_model.cache)
+        # Add new window
+        self._add_window_to_cache(new_plaintext, new_start, new_end, self.source_model.cache)
+        
+        # Channel cache is invariant to spaces, so no update needed
+
     def score_key_proposal(self, ciphertext: List[int], 
                           old_plaintext: str, new_plaintext: str,
                           old_key: dict, new_key: dict,
@@ -245,9 +337,10 @@ class IncrementalScorer:
         This method:
         1. Saves current cache states
         2. Finds affected positions and context window
-        3. Scores old window/substitutions (removing from cache)
-        4. Scores new window/substitutions (adding to cache)
-        5. Returns score deltas
+        3. Removes old window/substitutions from caches (creating shared caches)
+        4. Scores old window/substitutions using shared caches
+        5. Scores new window/substitutions using shared caches
+        6. Returns score deltas
         
         The cache is restored if the proposal is rejected (handled by caller).
         
@@ -266,7 +359,7 @@ class IncrementalScorer:
             Tuple[float, float, float, float]: (new_source_score, new_channel_score, 
                                                   source_delta, channel_delta)
         """
-        # Save current cache states
+        # Save current cache states (these are full caches)
         saved_source_cache = self.source_model.get_cache_copy()
         saved_channel_cache = self.channel_model.get_cache_copy()
         
@@ -282,24 +375,36 @@ class IncrementalScorer:
         # Find context window for source scoring
         start, end = self.find_context_window(new_plaintext, affected_positions)
         
-        # Score OLD window (to subtract from total)
-        old_window_score = self.score_window_source(old_plaintext, start, end, saved_source_cache)
+        # Create SHARED caches by removing the affected regions from the full caches
+        # This implements the "pretend affected area is at the end" logic
         
-        # Score NEW window (to add to total)
-        new_window_score = self.score_window_source(new_plaintext, start, end, saved_source_cache.copy())
+        # 1. Prepare Shared Source Cache
+        shared_source_cache = saved_source_cache.copy()
+        self._remove_window_from_cache(old_plaintext, start, end, shared_source_cache)
+        
+        # 2. Prepare Shared Channel Cache
+        shared_channel_cache = saved_channel_cache.copy()
+        self._remove_substitutions_from_cache(ciphertext, old_plaintext, changed_symbol, old_key, shared_channel_cache)
+        
+        # Score OLD window (using shared cache)
+        # We use a copy because scoring modifies the cache
+        old_window_score = self.score_window_source(old_plaintext, start, end, shared_source_cache.copy())
+        
+        # Score NEW window (using shared cache)
+        new_window_score = self.score_window_source(new_plaintext, start, end, shared_source_cache.copy())
         
         # Source delta
         source_delta = new_window_score - old_window_score
         new_source_score = old_source_score + source_delta
         
-        # Score OLD channel substitutions (to subtract)
+        # Score OLD channel substitutions (using shared cache)
         old_channel_score_for_symbol = self.score_substitutions_for_symbol(
-            ciphertext, old_plaintext, changed_symbol, old_key, saved_channel_cache
+            ciphertext, old_plaintext, changed_symbol, old_key, shared_channel_cache.copy()
         )
         
-        # Score NEW channel substitutions (to add)
+        # Score NEW channel substitutions (using shared cache)
         new_channel_score_for_symbol = self.score_substitutions_for_symbol(
-            ciphertext, new_plaintext, changed_symbol, new_key, saved_channel_cache.copy()
+            ciphertext, new_plaintext, changed_symbol, new_key, shared_channel_cache.copy()
         )
         
         # Channel delta

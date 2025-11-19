@@ -243,15 +243,12 @@ class CRPBayesianSampler:
             if self.use_crp:
                 assert isinstance(self.model, CRPJointModel)
                 
-                # Save cache states before scoring proposal
-                saved_source_cache = self.crp_source.get_cache_copy()
-                saved_channel_cache = self.crp_channel.get_cache_copy()
-                
                 # Get current component scores (n-gram only, no word dict yet)
                 current_ngram_score = self.current_score  # This is just n-gram for now
                 current_channel_score = self.current_channel_score  # Track separately
                 
                 # Use incremental scoring with proper exchangeability
+                # Note: score_key_proposal now uses copies of caches, so main caches are safe
                 new_source_score, new_channel_score, source_delta, channel_delta = \
                     self.incremental_scorer.score_key_proposal(
                         self._ciphertext, self.current_plaintext, proposed_plaintext,
@@ -280,15 +277,21 @@ class CRPBayesianSampler:
             log_acceptance_ratio = (proposed_score - self.current_score) / self.temperature
             
             if log_acceptance_ratio > 0.0 or math.log(random.uniform(0, 1)) < log_acceptance_ratio:
-                # Accept proposal - cache is already updated by incremental scorer
-                self.current_key = proposed_key
-                self.current_plaintext = proposed_plaintext
-                self.current_score = proposed_score
+                # Accept proposal
                 
+                # Update caches if using CRP
                 if self.use_crp:
+                    self.incremental_scorer.apply_key_changes_to_cache(
+                        self._ciphertext, self.current_plaintext, proposed_plaintext,
+                        self.current_key, proposed_key, symbol, self.space_positions
+                    )
                     # Update tracked component scores
                     self.current_ngram_score = new_source_score
                     self.current_channel_score = new_channel_score
+
+                self.current_key = proposed_key
+                self.current_plaintext = proposed_plaintext
+                self.current_score = proposed_score
                 
                 # Update best if improved
                 if self.current_score > self.best_score:
@@ -297,22 +300,27 @@ class CRPBayesianSampler:
                     self.best_plaintext = self.current_plaintext
                     self.best_score = self.current_score
             else:
-                # Proposal rejected - restore caches (DO NOT rebuild from scratch!)
-                if self.use_crp:
-                    self.incremental_scorer.restore_caches(saved_source_cache, saved_channel_cache)
+                # Proposal rejected - no cache restoration needed as we used copies
+                pass
     
+    def _get_plaintext_index(self, cipher_idx: int, space_positions: Set[int]) -> int:
+        """Get the index in plaintext corresponding to the cipher symbol at cipher_idx."""
+        # Count spaces that appear before or at this index (since space is inserted before char)
+        num_spaces = sum(1 for p in space_positions if p <= cipher_idx)
+        return cipher_idx + num_spaces
+
     def sample_space_pass(self) -> None:
         """Perform one pass of space sampling.
         
-        Space changes affect word boundaries which impacts n-gram context and word scoring.
-        For efficiency, we use incremental scoring focused on the affected region.
+        Iterates over all adjacent character pairs and samples whether to insert/remove a space.
+        Uses incremental scoring with exchangeability.
         """
-        num_proposals = max(1, len(self._ciphertext) // 10)  # Reduce proposals for efficiency
+        # Iterate over all possible space positions (between characters)
+        # We skip index 0 (start of text) as spaces are usually between words
+        possible_positions = list(range(1, len(self._ciphertext)))
+        random.shuffle(possible_positions)
         
-        for _ in range(num_proposals):
-            # Pick random position to toggle space
-            position = random.randint(0, len(self._ciphertext))
-            
+        for position in possible_positions:
             proposed_space_positions = self.space_positions.copy()
             if position in proposed_space_positions:
                 proposed_space_positions.remove(position)
@@ -330,28 +338,44 @@ class CRPBayesianSampler:
                 
                 # Save cache states
                 saved_source_cache = self.crp_source.get_cache_copy()
-                saved_channel_cache = self.crp_channel.get_cache_copy()
+                # Channel score is invariant to spaces (as it ignores them), so we don't need to update it
                 
-                # For space changes, we need to rescore affected word boundaries
                 # Find affected region around the space change
-                context_size = 20  # Characters around the space change
-                start = max(0, position - context_size)
-                end = min(len(proposed_plaintext), position + context_size)
+                # We need indices in both old and new plaintext
+                old_plain_idx = self._get_plaintext_index(position, self.space_positions)
+                new_plain_idx = self._get_plaintext_index(position, proposed_space_positions)
                 
-                # Score old window
-                old_window_score = self.incremental_scorer.score_window_source(
-                    self.current_plaintext, start, end, saved_source_cache
+                context_size = self.crp_source.n + 5  # Sufficient context
+                
+                # Define window in OLD plaintext
+                old_start = max(0, old_plain_idx - context_size)
+                old_end = min(len(self.current_plaintext), old_plain_idx + context_size)
+                
+                # Define window in NEW plaintext
+                new_start = max(0, new_plain_idx - context_size)
+                new_end = min(len(proposed_plaintext), new_plain_idx + context_size)
+                
+                # Prepare SHARED cache by removing old window
+                # This implements "pretend affected area is at the end"
+                shared_source_cache = saved_source_cache.copy()
+                self.incremental_scorer._remove_window_from_cache(
+                    self.current_plaintext, old_start, old_end, shared_source_cache
                 )
                 
-                # Score new window
+                # Score old window using shared cache
+                old_window_score = self.incremental_scorer.score_window_source(
+                    self.current_plaintext, old_start, old_end, shared_source_cache.copy()
+                )
+                
+                # Score new window using shared cache
                 new_window_score = self.incremental_scorer.score_window_source(
-                    proposed_plaintext, start, end, saved_source_cache.copy()
+                    proposed_plaintext, new_start, new_end, shared_source_cache.copy()
                 )
                 
                 source_delta = new_window_score - old_window_score
                 new_ngram_score = self.current_ngram_score + source_delta
                 
-                # Channel score unchanged (no key change)
+                # Channel score unchanged
                 new_channel_score = self.current_channel_score
                 
                 # Word dictionary score (recompute - it's fast)
@@ -361,7 +385,11 @@ class CRPBayesianSampler:
                     new_word_score = 0.0
                 
                 # Combine using interpolation weights
-                combined_source_score = 0.1 * new_ngram_score + 0.9 * new_word_score if self.model.dict_model else new_ngram_score
+                if self.model.dict_model is not None:
+                    combined_source_score = 0.1 * new_ngram_score + 0.9 * new_word_score
+                else:
+                    combined_source_score = new_ngram_score
+                    
                 proposed_score = combined_source_score + new_channel_score
             
             # Metropolis-Hastings acceptance
@@ -369,13 +397,18 @@ class CRPBayesianSampler:
             
             if log_acceptance_ratio > 0.0 or math.log(random.uniform(0, 1)) < log_acceptance_ratio:
                 # Accept proposal
+                
+                if self.use_crp:
+                    self.incremental_scorer.apply_space_changes_to_cache(
+                        self.current_plaintext, proposed_plaintext,
+                        old_start, old_end, new_start, new_end
+                    )
+                    self.current_ngram_score = new_ngram_score
+                    self.current_channel_score = new_channel_score
+                
                 self.space_positions = proposed_space_positions
                 self.current_plaintext = proposed_plaintext
                 self.current_score = proposed_score
-                
-                if self.use_crp:
-                    self.current_ngram_score = new_ngram_score
-                    self.current_channel_score = new_channel_score
                 
                 if self.current_score > self.best_score:
                     self.best_key = self.current_key.copy()
@@ -383,9 +416,8 @@ class CRPBayesianSampler:
                     self.best_plaintext = self.current_plaintext
                     self.best_score = self.current_score
             else:
-                # Proposal rejected - restore caches
-                if self.use_crp:
-                    self.incremental_scorer.restore_caches(saved_source_cache, saved_channel_cache)
+                # Proposal rejected - no cache restoration needed as we used copies
+                pass
     
     def calculate_ser(self, key: Dict[int, str] | None = None) -> float:
         """Calculate Symbol Error Rate."""
