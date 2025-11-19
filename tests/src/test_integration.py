@@ -194,7 +194,6 @@ class TestCRPPipelineIntegration:
         
         # Get current mapping for symbol 1
         old_char = sampler.current_key[1]
-        old_plaintext = sampler.current_plaintext
         
         # Force a change by running multiple samples
         for _ in range(20):

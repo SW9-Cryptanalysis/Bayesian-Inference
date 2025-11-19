@@ -12,7 +12,7 @@ where:
 
 import math
 import logging
-from typing import List, Tuple
+from typing import Tuple
 from nltk.lm.preprocessing import pad_both_ends
 from lm_models.n_gram_model import NgramLanguageModel
 from lm_models.crp_cache import CRPCache

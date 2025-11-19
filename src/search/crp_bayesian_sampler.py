@@ -356,12 +356,9 @@ class CRPBayesianSampler:
                 
                 # Word dictionary score (recompute - it's fast)
                 if self.model.dict_model is not None:
-                    old_word_score = self.model.dict_model.log_score_text(self.current_plaintext)
                     new_word_score = self.model.dict_model.log_score_text(proposed_plaintext)
-                    word_delta = new_word_score - old_word_score
                 else:
                     new_word_score = 0.0
-                    word_delta = 0.0
                 
                 # Combine using interpolation weights
                 combined_source_score = 0.1 * new_ngram_score + 0.9 * new_word_score if self.model.dict_model else new_ngram_score

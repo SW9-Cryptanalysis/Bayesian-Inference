@@ -9,7 +9,6 @@ Verifies:
 """
 
 import pytest
-import math
 from lm_models.crp_source_model import CRPSourceModel
 from lm_models.crp_channel_model import CRPChannelModel
 from lm_models.n_gram_model import NgramLanguageModel
@@ -169,9 +168,6 @@ class TestCRPChannelModel:
     
     def test_deterministic_substitution_behavior(self, channel_model):
         """Test that model favors deterministic substitution with low beta."""
-        plaintext_char = 'a'
-        cipher_symbol = 5
-        
         # Add many observations of same substitution
         for _ in range(100):
             channel_model.cache.add_substitution('a', 5)

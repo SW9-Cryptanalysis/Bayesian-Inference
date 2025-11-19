@@ -9,6 +9,7 @@ Verifies:
 """
 
 import pytest
+import math
 from lm_models.crp_source_model import CRPSourceModel
 from lm_models.crp_channel_model import CRPChannelModel
 from lm_models.n_gram_model import NgramLanguageModel
@@ -293,8 +294,6 @@ class TestCacheManagement:
         # Cache should be back to initial state
         assert source_model.cache.get_count(('t', 'h'), 'e') == initial_count
 
-
-import math
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

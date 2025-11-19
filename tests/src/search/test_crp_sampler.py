@@ -85,10 +85,7 @@ class TestCRPBayesianSampler:
             seed=42,
             use_crp=True
         )
-        
-        initial_plaintext = sampler.current_plaintext
-        initial_key = sampler.current_key.copy()
-        
+
         # Run one key sampling pass
         sampler.sample_key_pass()
         
@@ -110,9 +107,6 @@ class TestCRPBayesianSampler:
             seed=42,
             use_crp=True
         )
-        
-        # Get cache size before sampling
-        initial_cache_size = len(sampler.crp_source.cache.ngram_counts)
         
         # Run sampling (will have both accepts and rejects)
         for _ in range(5):
@@ -161,8 +155,6 @@ class TestCRPBayesianSampler:
             seed=42,
             use_crp=True
         )
-        
-        initial_spaces = sampler.space_positions.copy()
         
         # Run space sampling
         sampler.sample_space_pass()
