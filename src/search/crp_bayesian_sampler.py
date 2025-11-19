@@ -17,7 +17,6 @@ from lm_models.crp_source_model import CRPSourceModel
 from lm_models.crp_channel_model import CRPChannelModel
 from lm_models.n_gram_model import NgramLanguageModel
 from lm_models.dictionary_model import DictionaryLanguageModel
-from lm_models.interpolated_model import InterpolatedLanguageModel
 from utils.constants import TOTAL_ITERATIONS, INITIAL_TEMPERATURE, PROJECT_ROOT, ALPHA, BETA
 
 logger = logging.getLogger(__name__)
@@ -62,17 +61,13 @@ class CRPBayesianSampler:
         if use_crp:
             self.crp_source = CRPSourceModel(ngram_model, alpha=ALPHA)
             self.crp_channel = CRPChannelModel(len(set(ciphertext)), beta=BETA)
-            self.model: Union[CRPJointModel, InterpolatedLanguageModel] = CRPJointModel(
+            self.model = CRPJointModel(
                 self.crp_source,
                 self.crp_channel,
                 dict_model,
-                source_weight=0.5,
-                dict_weight=0.4,
-                channel_weight=0.1
+                ngram_weight=0.1,  # Paper uses 0.1 for n-gram
+                word_weight=0.9    # Paper uses 0.9 for word dictionary
             )
-        else:
-            # Fallback to standard interpolated model
-            self.model = InterpolatedLanguageModel(ngram_model, dict_model)
         
         # Initialize state
         self.temperature = INITIAL_TEMPERATURE
@@ -87,9 +82,6 @@ class CRPBayesianSampler:
             self.current_score = self.model.log_score(
                 self._ciphertext, self.current_plaintext, self.current_key
             )
-        else:
-            assert isinstance(self.model, InterpolatedLanguageModel)
-            self.current_score = self.model.log_score_text(self.current_plaintext)  # type: ignore
         
         # Track best solution
         self.best_key = self.current_key.copy()
@@ -204,9 +196,6 @@ class CRPBayesianSampler:
                 proposed_score = self.model.log_score(
                     self._ciphertext, proposed_plaintext, proposed_key
                 )
-            else:
-                assert isinstance(self.model, InterpolatedLanguageModel)
-                proposed_score = self.model.log_score_text(proposed_plaintext)  # type: ignore
             
             # Metropolis-Hastings acceptance
             log_acceptance_ratio = (proposed_score - self.current_score) / self.temperature
@@ -226,6 +215,7 @@ class CRPBayesianSampler:
             else:
                 # Proposal rejected - restore caches
                 if self.use_crp:
+                    assert isinstance(self.model, CRPJointModel)
                     self.model.clear_caches()
                     self.model.initialize_caches(self._ciphertext, self.current_plaintext)
     
@@ -256,9 +246,6 @@ class CRPBayesianSampler:
                 proposed_score = self.model.log_score(
                     self._ciphertext, proposed_plaintext, self.current_key
                 )
-            else:
-                assert isinstance(self.model, InterpolatedLanguageModel)
-                proposed_score = self.model.log_score_text(proposed_plaintext)  # type: ignore
             
             # Metropolis-Hastings acceptance
             log_acceptance_ratio = (proposed_score - self.current_score) / self.temperature
@@ -301,12 +288,13 @@ class CRPBayesianSampler:
         # Log component scores for debugging
         if self.use_crp:
             assert isinstance(self.model, CRPJointModel)
-            source_score, dict_score, channel_score = self.model.log_score_separate(
+            ngram_score, word_score, source_score, channel_score = self.model.log_score_separate(
                 self._ciphertext, self.current_plaintext, self.current_key
             )
-            logger.info(f"Initial CRP source score: {source_score:.2f}")
-            logger.info(f"Initial dict score: {dict_score:.2f}")
-            logger.info(f"Initial CRP channel score: {channel_score:.2f}")
+            logger.info(f"Initial CRP n-gram score: {ngram_score:.2f}")
+            logger.info(f"Initial word dict score: {word_score:.2f}")
+            logger.info(f"Initial interpolated P(p): {source_score:.2f}")
+            logger.info(f"Initial channel P(c|p): {channel_score:.2f}")
         
         logger.info(f"Initial plaintext: {self.current_plaintext[:100]}...")
         
@@ -331,10 +319,10 @@ class CRPBayesianSampler:
                 
                 if self.use_crp:
                     assert isinstance(self.model, CRPJointModel)
-                    source, dict_s, channel = self.model.log_score_separate(
+                    ngram, word, source, channel = self.model.log_score_separate(
                         self._ciphertext, self.best_plaintext, self.best_key
                     )
-                    logger.info(f"  Best CRP source: {source:.2f}, dict: {dict_s:.2f}, channel: {channel:.2f}")
+                    logger.info(f"  Best n-gram: {ngram:.2f}, word: {word:.2f}, P(p): {source:.2f}, P(c|p): {channel:.2f}")
                 
                 logger.info(f"  Current plaintext: {self.current_plaintext[:100]}...")
                 logger.info(f"  Best plaintext: {self.best_plaintext[:100]}...")

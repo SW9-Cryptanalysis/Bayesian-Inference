@@ -63,13 +63,18 @@ Where:
 The complete score combines both models:
 
 ```
-log P(p, c) = w_source * log P(p) + w_dict * log P_dict(p) + w_channel * log P(c|p)
+log P(p, c) = log P(p) + log P(c|p)
 ```
 
-Default weights:
-- w_source = 0.5 (CRP n-gram source)
-- w_dict = 0.4 (Dictionary model)
-- w_channel = 0.1 (CRP channel)
+Where P(p) is computed as an interpolation of n-gram and word models:
+
+```
+log P(p) = w_ngram * log P_ngram(p) + w_word * log P_word(p)
+```
+
+Interpolation weights (from paper):
+- w_ngram = 0.1 (CRP n-gram model)
+- w_word = 0.9 (Word dictionary model)
 
 **Implementation**: `CRPJointModel` in `crp_joint_model.py`
 
@@ -162,7 +167,7 @@ sampler = CRPBayesianSampler(
     dict_model=dict_model,
     ground_truth_key=ground_truth_key,
     seed=42,
-    use_crp=True  # Set False to disable CRP (use standard LM)
+    use_crp=True  # Use CRP with paper's 0.1/0.9 interpolation
 )
 
 # Run decipherment

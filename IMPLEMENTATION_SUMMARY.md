@@ -28,8 +28,8 @@ I've successfully implemented the Chinese Restaurant Process (CRP) approach for 
 #### `src/lm_models/crp_joint_model.py`
 - `CRPJointModel` class: Combines source and channel
 - Computes: `P(p, c) = P(p) * P(c|p)`
-- Weighted combination with dictionary model
-- Weights: 50% CRP source, 40% dictionary, 10% CRP channel
+- P(p) uses interpolated n-gram + word model
+- Weights for P(p): 10% n-gram, 90% word (from paper)
 
 #### `src/lm_models/incremental_scorer.py`
 - `IncrementalScorer` class: Framework for efficient scoring

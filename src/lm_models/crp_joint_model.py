@@ -29,39 +29,31 @@ class CRPJointModel:
     def __init__(self, 
                  crp_source_model: CRPSourceModel,
                  crp_channel_model: CRPChannelModel,
-                 dict_model: DictionaryLanguageModel = None,
-                 source_weight: float = 0.5,
-                 dict_weight: float = 0.4,
-                 channel_weight: float = 0.1):
+                 dict_model: DictionaryLanguageModel | None = None,
+                 ngram_weight: float = 0.1,
+                 word_weight: float = 0.9):
         """Initialize the joint model.
         
         Args:
             crp_source_model: CRP-based n-gram source model
             crp_channel_model: CRP-based channel model
-            dict_model: Optional dictionary model for word scoring
-            source_weight: Weight for CRP source model (default 0.5)
-            dict_weight: Weight for dictionary model (default 0.4)
-            channel_weight: Weight for channel model (default 0.1)
+            dict_model: Dictionary model for word scoring (interpolated with n-gram)
+            ngram_weight: Weight for n-gram model in P(p) (default 0.1 from paper)
+            word_weight: Weight for word model in P(p) (default 0.9 from paper)
         """
         self.crp_source = crp_source_model
         self.crp_channel = crp_channel_model
         self.dict_model = dict_model
         
-        # Weights for combining models (should sum to 1.0)
-        self.source_weight = source_weight
-        self.dict_weight = dict_weight
-        self.channel_weight = channel_weight
-        
-        # Normalize weights
-        total = source_weight + dict_weight + channel_weight
-        self.source_weight /= total
-        self.dict_weight /= total
-        self.channel_weight /= total
+        # Weights for interpolating n-gram and word models (from paper)
+        self.ngram_weight = ngram_weight
+        self.word_weight = word_weight
     
     def log_score(self, ciphertext: List[int], plaintext: str, key: dict) -> float:
         """Calculate the complete log P(p, c) = log P(p) + log P(c|p).
         
         This is the main scoring function for CRP-based decipherment.
+        P(p) is computed as an interpolation of n-gram and word models.
         
         Args:
             ciphertext: List of cipher symbols
@@ -71,26 +63,26 @@ class CRPJointModel:
         Returns:
             float: Combined log probability score
         """
-        # Score source: P(p)
-        source_score = self.crp_source.log_score_text(plaintext)
+        # Score source: P(p) = interpolated n-gram + word model
+        ngram_score = self.crp_source.log_score_text(plaintext)
+        word_score = 0.0
+        if self.dict_model is not None:
+            word_score = self.dict_model.log_score_text(plaintext)
+        
+        # Interpolate n-gram and word models for P(p) (paper uses 0.1, 0.9)
+        source_score = (self.ngram_weight * ngram_score + 
+                       self.word_weight * word_score)
         
         # Score channel: P(c|p)
         channel_score = self.crp_channel.log_score_key(ciphertext, plaintext, key)
         
-        # Optional dictionary score
-        dict_score = 0.0
-        if self.dict_model is not None:
-            dict_score = self.dict_model.log_score_text(plaintext)
-        
-        # Combine with weights
-        combined_score = (self.source_weight * source_score + 
-                         self.dict_weight * dict_score +
-                         self.channel_weight * channel_score)
+        # Final score: log P(p, c) = log P(p) + log P(c|p)
+        combined_score = source_score + channel_score
         
         return combined_score
     
     def log_score_separate(self, ciphertext: List[int], plaintext: str, 
-                          key: dict) -> Tuple[float, float, float]:
+                          key: dict) -> Tuple[float, float, float, float]:
         """Get separate scores for debugging.
         
         Args:
@@ -99,15 +91,20 @@ class CRPJointModel:
             key: Substitution key
             
         Returns:
-            Tuple[float, float, float]: (source_score, dict_score, channel_score)
+            Tuple[float, float, float, float]: (ngram_score, word_score, interpolated_source_score, channel_score)
         """
-        source_score = self.crp_source.log_score_text(plaintext)
-        channel_score = self.crp_channel.log_score_key(ciphertext, plaintext, key)
-        dict_score = 0.0
+        ngram_score = self.crp_source.log_score_text(plaintext)
+        word_score = 0.0
         if self.dict_model is not None:
-            dict_score = self.dict_model.log_score_text(plaintext)
+            word_score = self.dict_model.log_score_text(plaintext)
         
-        return (source_score, dict_score, channel_score)
+        # Interpolated source score
+        source_score = (self.ngram_weight * ngram_score + 
+                       self.word_weight * word_score)
+        
+        channel_score = self.crp_channel.log_score_key(ciphertext, plaintext, key)
+        
+        return (ngram_score, word_score, source_score, channel_score)
     
     def initialize_caches(self, ciphertext: List[int], plaintext: str) -> None:
         """Initialize both source and channel caches with current hypothesis.

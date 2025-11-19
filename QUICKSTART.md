@@ -56,23 +56,27 @@ Final best plaintext: the quick brown fox jumps over the lazy dog
 
 ### Score Components
 
-**CRP Source Score** (-4.15)
-- How likely the plaintext is according to CRP n-gram model
-- Higher (less negative) = more English-like
+**CRP N-gram Score** (-4.15)
+- Character n-gram score from CRP source model
+- Higher (less negative) = more English-like character patterns
 - Uses cache + base n-gram model with α prior
 
-**Dict Score** (-3.05)
+**Word Dict Score** (-3.05)
 - How many valid dictionary words
 - Higher = more real words
 - Based on 10k word frequency list
 
-**CRP Channel Score** (-1.03)
+**Interpolated P(p)** (-2.15)
+- Combined source model: 0.1 * n-gram + 0.9 * word (from paper)
+- This represents how likely the plaintext is
+
+**Channel P(c|p)** (-1.03)
 - How consistent the substitutions are
 - Higher = more deterministic (1-to-1) mappings
 - Uses cache + uniform base with β prior
 
-**Combined Score** (-2.15)
-- Weighted average: 0.5*source + 0.4*dict + 0.1*channel
+**Final Score** 
+- log P(p, c) = log P(p) + log P(c|p)
 - This is what the sampler optimizes
 
 ### Symbol Error Rate (SER)
@@ -109,16 +113,16 @@ INITIAL_TEMPERATURE = 10.0    # Higher = more exploration early
 
 ## Model Weights
 
-Edit `src/search/crp_bayesian_sampler.py` line 62-66:
+Edit `src/lm_models/crp_joint_model.py` or when creating `CRPJointModel`:
 
 ```python
+# Paper uses these interpolation weights for P(p):
 self.model = CRPJointModel(
     self.crp_source,
     self.crp_channel,
     dict_model,
-    source_weight=0.5,   # CRP n-gram model weight
-    dict_weight=0.4,     # Dictionary model weight
-    channel_weight=0.1   # CRP channel model weight
+    ngram_weight=0.1,   # N-gram model weight (paper: 0.1)
+    word_weight=0.9     # Word dictionary weight (paper: 0.9)
 )
 ```
 
