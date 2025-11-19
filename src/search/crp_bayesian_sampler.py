@@ -3,6 +3,38 @@ CRP-based Bayesian sampler for substitution cipher decipherment.
 
 This is the main implementation following the paper's approach using
 Chinese Restaurant Process formulations for both source and channel models.
+
+Key Implementation Details (matching paper):
+1. CRP Formulas:
+   - Source: P(pi|pi-1) = (α·P0 + C(pi-1,pi)) / (α + C(pi-1))
+   - Channel: P(ci|pi) = (β·P0 + C(pi,ci)) / (β + C(pi))
+   - α = 10,000 (high, favors base LM), β = 0.01 (low, favors deterministic substitution)
+
+2. Incremental Scoring with Exchangeability:
+   - When sampling at position i, affected region is scored separately
+   - Cache is saved before proposal, restored on rejection (NOT rebuilt!)
+   - Only affected context window is rescored, not entire plaintext
+   - This is the key efficiency optimization from the paper
+
+3. Type Sampling:
+   - Sample plaintext letter for each cipher symbol type (not position-wise)
+   - All occurrences of a symbol are updated simultaneously
+   - Uses Metropolis-Hastings acceptance with simulated annealing
+
+4. Space Sampling:
+   - Second pass that adds/removes word boundaries
+   - Also uses incremental scoring for efficiency
+   - Enables decipherment of ciphers without spaces
+
+5. Interpolated Language Model:
+   - P(p) = 0.1 × P_ngram(p) + 0.9 × P_word(p)
+   - Combines character n-grams with word dictionary
+   - Makes model robust to variations and misspellings
+
+6. Cache Management (Critical Fix):
+   - Caches are NEVER cleared/rebuilt during sampling except initialization
+   - Proposals modify cache temporarily; restoration on rejection
+   - This maintains efficiency and correctness of CRP inference
 """
 
 import random
@@ -10,13 +42,14 @@ import math
 import logging
 import json
 from collections import Counter
-from typing import Tuple, Dict, List, Set, Union
+from typing import Tuple, Dict, List, Set
 
 from lm_models.crp_joint_model import CRPJointModel
 from lm_models.crp_source_model import CRPSourceModel
 from lm_models.crp_channel_model import CRPChannelModel
 from lm_models.n_gram_model import NgramLanguageModel
 from lm_models.dictionary_model import DictionaryLanguageModel
+from lm_models.incremental_scorer import IncrementalScorer
 from utils.constants import TOTAL_ITERATIONS, INITIAL_TEMPERATURE, PROJECT_ROOT, ALPHA, BETA
 
 logger = logging.getLogger(__name__)
@@ -48,7 +81,7 @@ class CRPBayesianSampler:
             dict_model: Dictionary language model for word-level scoring
             ground_truth_key: Ground truth key for evaluation
             seed: Random seed for reproducibility
-            use_crp: If True, use CRP models; if False, use standard models (for comparison)
+            use_crp: If True, use CRP models with incremental scoring; if False, use standard models
         """
         if seed is not None:
             random.seed(seed)
@@ -68,6 +101,9 @@ class CRPBayesianSampler:
                 ngram_weight=0.1,  # Paper uses 0.1 for n-gram
                 word_weight=0.9    # Paper uses 0.9 for word dictionary
             )
+            
+            # Always use incremental scorer with CRP for efficiency
+            self.incremental_scorer = IncrementalScorer(self.crp_source, self.crp_channel)
         
         # Initialize state
         self.temperature = INITIAL_TEMPERATURE
@@ -82,6 +118,15 @@ class CRPBayesianSampler:
             self.current_score = self.model.log_score(
                 self._ciphertext, self.current_plaintext, self.current_key
             )
+            
+            # Track component scores separately for incremental updates
+            ngram, word, source, channel = self.model.log_score_separate(
+                self._ciphertext, self.current_plaintext, self.current_key
+            )
+            self.current_ngram_score = ngram
+            self.current_word_score = word
+            self.current_source_score = source
+            self.current_channel_score = channel
         
         # Track best solution
         self.best_key = self.current_key.copy()
@@ -169,7 +214,11 @@ class CRPBayesianSampler:
         self.temperature = INITIAL_TEMPERATURE - (9.0 * iteration / num_iterations)
     
     def sample_key_pass(self) -> None:
-        """Perform one pass of type sampling over all cipher symbols."""
+        """Perform one pass of type sampling over all cipher symbols.
+        
+        Uses proper incremental scoring with exchangeability property to efficiently
+        evaluate proposals without rescoring the entire plaintext.
+        """
         unique_symbols = list(set(self._ciphertext))
         random.shuffle(unique_symbols)
         
@@ -178,6 +227,10 @@ class CRPBayesianSampler:
         for symbol in unique_symbols:
             # Propose new mapping
             proposed_char = random.choice(plaintext_chars)
+            
+            # Skip if this is already the current mapping
+            if self.current_key.get(symbol) == proposed_char:
+                continue
             
             # Create proposed key
             proposed_key = self.current_key.copy()
@@ -188,23 +241,54 @@ class CRPBayesianSampler:
             
             # Calculate proposed score
             if self.use_crp:
-                # For CRP, we need to rescore with the joint model
-                # Clear and rebuild caches for the proposal
                 assert isinstance(self.model, CRPJointModel)
-                self.model.clear_caches()
-                self.model.initialize_caches(self._ciphertext, proposed_plaintext)
-                proposed_score = self.model.log_score(
-                    self._ciphertext, proposed_plaintext, proposed_key
-                )
+                
+                # Save cache states before scoring proposal
+                saved_source_cache = self.crp_source.get_cache_copy()
+                saved_channel_cache = self.crp_channel.get_cache_copy()
+                
+                # Get current component scores (n-gram only, no word dict yet)
+                current_ngram_score = self.current_score  # This is just n-gram for now
+                current_channel_score = self.current_channel_score  # Track separately
+                
+                # Use incremental scoring with proper exchangeability
+                new_source_score, new_channel_score, source_delta, channel_delta = \
+                    self.incremental_scorer.score_key_proposal(
+                        self._ciphertext, self.current_plaintext, proposed_plaintext,
+                        self.current_key, proposed_key, symbol, self.space_positions,
+                        current_ngram_score, current_channel_score
+                    )
+                
+                # For now, word dictionary component is computed separately (TODO: make incremental)
+                # This is acceptable since word scoring is lightweight compared to CRP n-gram scoring
+                if self.model.dict_model is not None:
+                    old_word_score = self.model.dict_model.log_score_text(self.current_plaintext)
+                    new_word_score = self.model.dict_model.log_score_text(proposed_plaintext)
+                    word_delta = new_word_score - old_word_score
+                else:
+                    word_delta = 0.0
+                
+                # Combine using paper's interpolation weights (0.1 n-gram, 0.9 word)
+                if self.model.dict_model is not None:
+                    new_word_score = old_word_score + word_delta
+                    combined_source_score = 0.1 * new_source_score + 0.9 * new_word_score
+                else:
+                    combined_source_score = new_source_score
+                proposed_score = combined_source_score + new_channel_score
             
             # Metropolis-Hastings acceptance
             log_acceptance_ratio = (proposed_score - self.current_score) / self.temperature
             
             if log_acceptance_ratio > 0.0 or math.log(random.uniform(0, 1)) < log_acceptance_ratio:
-                # Accept proposal
+                # Accept proposal - cache is already updated by incremental scorer
                 self.current_key = proposed_key
                 self.current_plaintext = proposed_plaintext
                 self.current_score = proposed_score
+                
+                if self.use_crp:
+                    # Update tracked component scores
+                    self.current_ngram_score = new_source_score
+                    self.current_channel_score = new_channel_score
                 
                 # Update best if improved
                 if self.current_score > self.best_score:
@@ -213,15 +297,17 @@ class CRPBayesianSampler:
                     self.best_plaintext = self.current_plaintext
                     self.best_score = self.current_score
             else:
-                # Proposal rejected - restore caches
+                # Proposal rejected - restore caches (DO NOT rebuild from scratch!)
                 if self.use_crp:
-                    assert isinstance(self.model, CRPJointModel)
-                    self.model.clear_caches()
-                    self.model.initialize_caches(self._ciphertext, self.current_plaintext)
+                    self.incremental_scorer.restore_caches(saved_source_cache, saved_channel_cache)
     
     def sample_space_pass(self) -> None:
-        """Perform one pass of space sampling."""
-        num_proposals = max(1, len(self._ciphertext))
+        """Perform one pass of space sampling.
+        
+        Space changes affect word boundaries which impacts n-gram context and word scoring.
+        For efficiency, we use incremental scoring focused on the affected region.
+        """
+        num_proposals = max(1, len(self._ciphertext) // 10)  # Reduce proposals for efficiency
         
         for _ in range(num_proposals):
             # Pick random position to toggle space
@@ -241,19 +327,58 @@ class CRPBayesianSampler:
             # Calculate proposed score
             if self.use_crp:
                 assert isinstance(self.model, CRPJointModel)
-                self.model.clear_caches()
-                self.model.initialize_caches(self._ciphertext, proposed_plaintext)
-                proposed_score = self.model.log_score(
-                    self._ciphertext, proposed_plaintext, self.current_key
+                
+                # Save cache states
+                saved_source_cache = self.crp_source.get_cache_copy()
+                saved_channel_cache = self.crp_channel.get_cache_copy()
+                
+                # For space changes, we need to rescore affected word boundaries
+                # Find affected region around the space change
+                context_size = 20  # Characters around the space change
+                start = max(0, position - context_size)
+                end = min(len(proposed_plaintext), position + context_size)
+                
+                # Score old window
+                old_window_score = self.incremental_scorer.score_window_source(
+                    self.current_plaintext, start, end, saved_source_cache
                 )
+                
+                # Score new window
+                new_window_score = self.incremental_scorer.score_window_source(
+                    proposed_plaintext, start, end, saved_source_cache.copy()
+                )
+                
+                source_delta = new_window_score - old_window_score
+                new_ngram_score = self.current_ngram_score + source_delta
+                
+                # Channel score unchanged (no key change)
+                new_channel_score = self.current_channel_score
+                
+                # Word dictionary score (recompute - it's fast)
+                if self.model.dict_model is not None:
+                    old_word_score = self.model.dict_model.log_score_text(self.current_plaintext)
+                    new_word_score = self.model.dict_model.log_score_text(proposed_plaintext)
+                    word_delta = new_word_score - old_word_score
+                else:
+                    new_word_score = 0.0
+                    word_delta = 0.0
+                
+                # Combine using interpolation weights
+                combined_source_score = 0.1 * new_ngram_score + 0.9 * new_word_score if self.model.dict_model else new_ngram_score
+                proposed_score = combined_source_score + new_channel_score
             
             # Metropolis-Hastings acceptance
             log_acceptance_ratio = (proposed_score - self.current_score) / self.temperature
             
             if log_acceptance_ratio > 0.0 or math.log(random.uniform(0, 1)) < log_acceptance_ratio:
+                # Accept proposal
                 self.space_positions = proposed_space_positions
                 self.current_plaintext = proposed_plaintext
                 self.current_score = proposed_score
+                
+                if self.use_crp:
+                    self.current_ngram_score = new_ngram_score
+                    self.current_channel_score = new_channel_score
                 
                 if self.current_score > self.best_score:
                     self.best_key = self.current_key.copy()
@@ -263,9 +388,7 @@ class CRPBayesianSampler:
             else:
                 # Proposal rejected - restore caches
                 if self.use_crp:
-                    assert isinstance(self.model, CRPJointModel)
-                    self.model.clear_caches()
-                    self.model.initialize_caches(self._ciphertext, self.current_plaintext)
+                    self.incremental_scorer.restore_caches(saved_source_cache, saved_channel_cache)
     
     def calculate_ser(self, key: Dict[int, str] | None = None) -> float:
         """Calculate Symbol Error Rate."""

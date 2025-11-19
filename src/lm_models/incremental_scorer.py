@@ -3,14 +3,37 @@ Efficient incremental scoring using the exchangeability property.
 
 When sampling at a position, we only need to rescore the affected context window
 rather than the entire plaintext. This dramatically speeds up sampling for long texts.
+
+EXCHANGEABILITY PROPERTY (from paper):
+The key insight: when sampling at position i, we pretend the affected area occurs 
+at the end of the corpus. This means:
+
+1. Both old and new derivations share the same cache for text before affected region
+2. We only need to score the difference between old and new in the affected window
+3. Score_new = Score_old - Score_old_window + Score_new_window
+
+Example:
+  Text: "the quick brown fox"
+  Change: 'q' -> 'x' at position 4
+  Affected window: "the [quick] brown" (with n-gram context)
+  
+  Instead of rescoring entire text:
+    - Save cache state from "the "
+    - Remove "quick" from cache and compute its score
+    - Add "xuick" to cache and compute its score
+    - Delta = score("xuick") - score("quick")
+    
+This is valid because CRP is exchangeable: the order of observations doesn't 
+affect the final probability, as long as we account for the sequential cache updates.
 """
 
 import math
 import logging
-from typing import List, Tuple, Set
+from typing import List, Tuple, Set, Optional
 from nltk.lm.preprocessing import pad_both_ends
 from lm_models.crp_source_model import CRPSourceModel
 from lm_models.crp_channel_model import CRPChannelModel
+from lm_models.crp_cache import CRPCache, ChannelCache
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +44,12 @@ class IncrementalScorer:
     Uses the exchangeability property: when updating positions, pretend
     the affected region occurs at the end of the corpus, allowing us to
     share the cache for unchanged regions.
+    
+    This implementation properly:
+    1. Saves the cache state before scoring a proposal
+    2. Scores only the affected window with proper context
+    3. Computes the score delta (not absolute scores)
+    4. Restores cache if proposal is rejected
     """
     
     def __init__(self, source_model: CRPSourceModel, channel_model: CRPChannelModel):
@@ -34,8 +63,8 @@ class IncrementalScorer:
         self.channel_model = channel_model
         self.n = source_model.n
     
-    def find_affected_positions(self, ciphertext: List[int], changed_symbol: int, 
-                               space_positions: Set[int]) -> Set[int]:
+    def find_affected_positions_in_plaintext(self, ciphertext: List[int], changed_symbol: int, 
+                                             space_positions: Set[int]) -> List[int]:
         """Find all positions in plaintext affected by changing a cipher symbol.
         
         When we change the mapping for a cipher symbol, all occurrences of that
@@ -47,9 +76,9 @@ class IncrementalScorer:
             space_positions: Current space positions
             
         Returns:
-            Set[int]: Indices in the plaintext (with spaces) that are affected
+            List[int]: Sorted indices in the plaintext (with spaces) that are affected
         """
-        affected = set()
+        affected = []
         
         # Find all positions of this symbol in ciphertext
         for cipher_idx, symbol in enumerate(ciphertext):
@@ -61,19 +90,20 @@ class IncrementalScorer:
                         plain_idx += 1
                     else:
                         break
-                affected.add(plain_idx)
+                affected.append(plain_idx)
         
-        return affected
+        return sorted(affected)
     
-    def find_context_window(self, plaintext: str, affected_positions: Set[int]) -> Tuple[int, int]:
+    def find_context_window(self, plaintext: str, affected_positions: List[int]) -> Tuple[int, int]:
         """Find the context window that needs to be rescored.
         
         The context window extends n-1 characters before and after the affected region
-        to capture all n-grams that include the changed characters.
+        to capture all n-grams that include the changed characters. We also extend to
+        word boundaries (spaces) to properly handle word-level scoring.
         
         Args:
             plaintext: The full plaintext
-            affected_positions: Set of affected character positions
+            affected_positions: Sorted list of affected character positions
             
         Returns:
             Tuple[int, int]: (start_index, end_index) of the context window
@@ -82,24 +112,33 @@ class IncrementalScorer:
             return (0, 0)
         
         # Find min and max affected positions
-        min_pos = min(affected_positions)
-        max_pos = max(affected_positions)
+        min_pos = affected_positions[0]
+        max_pos = affected_positions[-1]
         
-        # Extend by n-1 in each direction for context
+        # Extend by n-1 in each direction for n-gram context
         start = max(0, min_pos - (self.n - 1))
         end = min(len(plaintext), max_pos + self.n)
         
+        # Extend to word boundaries (spaces) for proper word scoring
+        while start > 0 and plaintext[start - 1] != ' ':
+            start -= 1
+        while end < len(plaintext) and plaintext[end] != ' ':
+            end += 1
+        
         return (start, end)
     
-    def score_window_source(self, plaintext: str, start: int, end: int,
-                           use_existing_cache: bool = True) -> float:
-        """Score a window of plaintext using the source model.
+    def score_window_source(self, plaintext: str, start: int, end: int, 
+                           saved_cache: Optional[CRPCache] = None) -> float:
+        """Score a window of plaintext using the source model with proper cache handling.
+        
+        Uses exchangeability: the cache is built from text before the window, then
+        we score the window and update the cache as we go.
         
         Args:
             plaintext: The full plaintext
             start: Start index of window
             end: End index of window
-            use_existing_cache: If True, use cache built from text before start
+            saved_cache: Pre-saved cache state from before the window (if None, builds from scratch)
             
         Returns:
             float: Log probability of the window
@@ -107,16 +146,16 @@ class IncrementalScorer:
         if start >= end:
             return 0.0
         
-        window_text = plaintext[start:end]
-        
-        # If not using existing cache, clear it
-        if not use_existing_cache:
+        # Set or build cache for text before window
+        if saved_cache is not None:
+            self.source_model.set_cache(saved_cache)
+        else:
             self.source_model.clear_cache()
-            # Build cache from text before window
             if start > 0:
                 self.source_model.build_cache_from_text(plaintext[:start])
         
         # Score the window
+        window_text = plaintext[start:end]
         char_list = list(window_text.lower())
         padded = list(pad_both_ends(char_list, n=self.n))
         
@@ -129,6 +168,7 @@ class IncrementalScorer:
             prob = self.source_model.score_char(char, context)
             
             if prob <= 0:
+                logger.warning(f"Zero prob in window scoring: char='{char}', context={context}")
                 return -float("inf")
             
             total_log_prob += math.log(prob)
@@ -138,103 +178,142 @@ class IncrementalScorer:
         
         return total_log_prob
     
-    def score_window_channel(self, ciphertext: List[int], plaintext: str,
-                            affected_positions: Set[int], key: dict,
-                            use_existing_cache: bool = True) -> float:
-        """Score affected substitutions using the channel model.
+    def score_substitutions_for_symbol(self, ciphertext: List[int], plaintext: str,
+                                       changed_symbol: int, key: dict,
+                                       saved_cache: Optional[ChannelCache] = None) -> float:
+        """Score all substitutions for a specific cipher symbol using channel model.
         
         Args:
             ciphertext: The ciphertext symbols
-            plaintext: The full plaintext (with spaces)
-            affected_positions: Positions in plaintext that changed
+            plaintext: The plaintext (with spaces)
+            changed_symbol: The cipher symbol to score
             key: Current substitution key
-            use_existing_cache: If True, use cache built from unaffected pairs
+            saved_cache: Pre-saved cache state (if None, builds from scratch)
             
         Returns:
-            float: Log probability of the affected substitutions
+            float: Log probability of all substitutions for this symbol
         """
-        if not affected_positions:
-            return 0.0
-        
-        # Remove spaces to align with ciphertext
         plaintext_no_spaces = plaintext.replace(" ", "").lower()
         
-        if not use_existing_cache:
+        if len(ciphertext) != len(plaintext_no_spaces):
+            logger.error(f"Length mismatch: cipher={len(ciphertext)}, plain={len(plaintext_no_spaces)}")
+            return -float("inf")
+        
+        # Set or build cache
+        if saved_cache is not None:
+            self.channel_model.set_cache(saved_cache)
+        else:
             self.channel_model.clear_cache()
-            # Build cache from unaffected pairs
-            for i, (cipher_symbol, plain_char) in enumerate(zip(ciphertext, plaintext_no_spaces)):
-                # Convert plaintext index (no spaces) to plaintext index (with spaces)
-                # to check if it's affected
-                # This is a simplified check - in practice, we track by cipher position
-                if i not in affected_positions:
+            # Build cache from all substitutions except those involving changed_symbol
+            for cipher_symbol, plain_char in zip(ciphertext, plaintext_no_spaces):
+                if cipher_symbol != changed_symbol:
                     self.channel_model.cache.add_substitution(plain_char, cipher_symbol)
         
-        # Score only the affected substitutions
+        # Score only substitutions for the changed symbol
         total_log_prob = 0.0
+        count = 0
         
-        for cipher_idx, cipher_symbol in enumerate(ciphertext):
-            plain_char = plaintext_no_spaces[cipher_idx]
-            
-            # Check if this position is affected
-            # (We need to map cipher_idx to plaintext_with_spaces_idx)
-            # For now, rescore all positions where the symbol appears
-            if key.get(cipher_symbol) != plain_char:
-                continue  # Skip if key doesn't match (shouldn't happen)
-            
-            # Check if this cipher symbol was the one that changed
-            # (This is a simplification - proper implementation would track exact positions)
-            
-            prob = self.channel_model.score_substitution(plain_char, cipher_symbol)
-            
-            if prob <= 0:
-                return -float("inf")
-            
-            total_log_prob += math.log(prob)
+        for cipher_symbol, plain_char in zip(ciphertext, plaintext_no_spaces):
+            if cipher_symbol == changed_symbol:
+                # Verify key consistency
+                if key.get(cipher_symbol) != plain_char:
+                    logger.error(f"Key mismatch: {cipher_symbol} -> {key.get(cipher_symbol)} != {plain_char}")
+                    return -float("inf")
+                
+                prob = self.channel_model.score_substitution(plain_char, cipher_symbol)
+                
+                if prob <= 0:
+                    logger.warning(f"Zero prob in channel: {plain_char} -> {cipher_symbol}")
+                    return -float("inf")
+                
+                total_log_prob += math.log(prob)
+                count += 1
+                
+                # Update cache for next occurrence
+                self.channel_model.cache.add_substitution(plain_char, cipher_symbol)
         
         return total_log_prob
     
-    def score_proposal_incremental(self, ciphertext: List[int], 
-                                   old_plaintext: str, new_plaintext: str,
-                                   old_key: dict, new_key: dict,
-                                   changed_symbol: int,
-                                   space_positions: Set[int]) -> Tuple[float, float]:
-        """Score a proposal incrementally by only rescoring affected regions.
+    def score_key_proposal(self, ciphertext: List[int], 
+                          old_plaintext: str, new_plaintext: str,
+                          old_key: dict, new_key: dict,
+                          changed_symbol: int,
+                          space_positions: Set[int],
+                          old_source_score: float, old_channel_score: float) -> Tuple[float, float, float, float]:
+        """Score a key change proposal using proper incremental scoring with exchangeability.
         
-        This is the key optimization: instead of rescoring the entire text,
-        we only rescore the parts that changed.
+        This method:
+        1. Saves current cache states
+        2. Finds affected positions and context window
+        3. Scores old window/substitutions (removing from cache)
+        4. Scores new window/substitutions (adding to cache)
+        5. Returns score deltas
+        
+        The cache is restored if the proposal is rejected (handled by caller).
         
         Args:
             ciphertext: The ciphertext symbols
-            old_plaintext: Previous plaintext hypothesis
+            old_plaintext: Current plaintext hypothesis
             new_plaintext: Proposed new plaintext
-            old_key: Previous key
-            new_key: Proposed new key
+            old_key: Current substitution key
+            new_key: Proposed substitution key
             changed_symbol: Which cipher symbol's mapping changed
             space_positions: Current space positions
+            old_source_score: Current source model score (for computing delta)
+            old_channel_score: Current channel model score (for computing delta)
             
         Returns:
-            Tuple[float, float]: (source_log_prob, channel_log_prob)
+            Tuple[float, float, float, float]: (new_source_score, new_channel_score, 
+                                                  source_delta, channel_delta)
         """
-        # Find affected positions
-        affected_positions = self.find_affected_positions(ciphertext, changed_symbol, space_positions)
+        # Save current cache states
+        saved_source_cache = self.source_model.get_cache_copy()
+        saved_channel_cache = self.channel_model.get_cache_copy()
         
-        # Find context window
+        # Find affected positions in plaintext
+        affected_positions = self.find_affected_positions_in_plaintext(
+            ciphertext, changed_symbol, space_positions
+        )
+        
+        if not affected_positions:
+            # No changes needed
+            return (old_source_score, old_channel_score, 0.0, 0.0)
+        
+        # Find context window for source scoring
         start, end = self.find_context_window(new_plaintext, affected_positions)
         
-        # Score the window with source model
-        source_score = self.score_window_source(new_plaintext, start, end, use_existing_cache=False)
+        # Score OLD window (to subtract from total)
+        old_window_score = self.score_window_source(old_plaintext, start, end, saved_source_cache)
         
-        # Score affected substitutions with channel model
-        # For simplicity, we'll rescore all substitutions for the changed symbol
-        channel_score = 0.0
-        plaintext_no_spaces = new_plaintext.replace(" ", "").lower()
+        # Score NEW window (to add to total)
+        new_window_score = self.score_window_source(new_plaintext, start, end, saved_source_cache.copy())
         
-        for cipher_idx, cipher_symbol in enumerate(ciphertext):
-            if cipher_symbol == changed_symbol:
-                plain_char = plaintext_no_spaces[cipher_idx]
-                prob = self.channel_model.score_substitution(plain_char, cipher_symbol)
-                if prob <= 0:
-                    return (-float("inf"), -float("inf"))
-                channel_score += math.log(prob)
+        # Source delta
+        source_delta = new_window_score - old_window_score
+        new_source_score = old_source_score + source_delta
         
-        return (source_score, channel_score)
+        # Score OLD channel substitutions (to subtract)
+        old_channel_score_for_symbol = self.score_substitutions_for_symbol(
+            ciphertext, old_plaintext, changed_symbol, old_key, saved_channel_cache
+        )
+        
+        # Score NEW channel substitutions (to add)
+        new_channel_score_for_symbol = self.score_substitutions_for_symbol(
+            ciphertext, new_plaintext, changed_symbol, new_key, saved_channel_cache.copy()
+        )
+        
+        # Channel delta
+        channel_delta = new_channel_score_for_symbol - old_channel_score_for_symbol
+        new_channel_score = old_channel_score + channel_delta
+        
+        return (new_source_score, new_channel_score, source_delta, channel_delta)
+    
+    def restore_caches(self, saved_source_cache: CRPCache, saved_channel_cache: ChannelCache) -> None:
+        """Restore cache states (used when proposal is rejected).
+        
+        Args:
+            saved_source_cache: Saved source model cache
+            saved_channel_cache: Saved channel model cache
+        """
+        self.source_model.set_cache(saved_source_cache)
+        self.channel_model.set_cache(saved_channel_cache)

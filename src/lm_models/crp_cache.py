@@ -4,6 +4,30 @@ Chinese Restaurant Process (CRP) cache for tracking n-gram and channel counts.
 This module implements the cache mechanism C^{i-1}_1 described in the paper,
 which tracks counts of events (n-grams or channel substitutions) that have
 occurred before position i in the current derivation.
+
+CACHE ROLE IN CRP:
+The cache is central to the CRP formulation. It tracks what we've seen so far
+in the current derivation, creating a "rich get richer" dynamic:
+
+1. For Source Model P(p):
+   - Cache tracks n-grams: C(context, char) = count of times 'char' followed 'context'
+   - Formula: P(char|context) = (α·P0 + C(context,char)) / (α + C(context))
+   - High counts -> higher probability (texts reuse common n-grams)
+
+2. For Channel Model P(c|p):
+   - Cache tracks substitutions: C(plain, cipher) = count of substitutions
+   - Formula: P(cipher|plain) = (β·P0 + C(plain,cipher)) / (β + C(plain))
+   - With low β, repeated substitutions become highly probable (determinism)
+
+CACHE MANAGEMENT DURING SAMPLING:
+- Initialized once with starting hypothesis
+- Modified incrementally as proposals are evaluated
+- MUST be saved before evaluating proposal
+- MUST be restored if proposal is rejected
+- NEVER cleared/rebuilt during sampling (kills efficiency)
+
+The cache is what makes CRP inference practical for long texts, as it captures
+the sequential dependencies without requiring full rescoring.
 """
 
 from collections import defaultdict
